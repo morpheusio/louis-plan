@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html-to-image/1.11.13/html-to-image.min.js" integrity="sha512-iZ2ORl595Wx6miw+GuadDet4WQbdSWS3JLMoNfY8cRGoEFy6oT3G9IbcrBeL6AfkgpA51ETt/faX6yLV+/gFJg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script>
+      (function() {
+        const originalConsole = window.console;
+        window.console = {
+          log: (...args) => {
+            originalConsole.log(...args);
+            window.parent.postMessage({ type: 'console', message: args.join(' ') }, '*');
+          },
+          error: (...args) => {
+            originalConsole.error(...args);
+            window.parent.postMessage({ type: 'console', message: 'Error: ' + args.join(' ') }, '*');
+          },
+          warn: (...args) => {
+            originalConsole.warn(...args);
+            window.parent.postMessage({ type: 'console', message: 'Warning: ' + args.join(' ') }, '*');
+          }
+        };
+
+        let requestId = 0;
+        let callbacksMap = new Map();
+        window.claude = {
+          complete: (prompt) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'claudeComplete', id, prompt }, '*');
+            });
+          }
+        };
+
+        let pendingBlobs = new Map();
+        URL.createObjectURL = (blob) => {
+          // Store the blob and create an ID and URL for it
+          const blobId = `blob-${Date.now()}-${Math.random()}`;
+          pendingBlobs.set(blobId, blob);
+          return `blob-request://${blobId}`;
+        };
+
+        URL.revokeObjectURL = (url) => {
+          // Remove the blob from our store
+          const blobId = url.replace("blob-request://", "");
+          pendingBlobs.delete(blobId);
+        };
+
+        const getBlobFromURL = (url) => {
+          const blobId = url.replace("blob-request://", "");
+          return pendingBlobs.get(blobId);
+        };
+
+        // Override global fetch
+        window.fetch = (url, init = {}) => {
+          return new Promise((resolve, reject) => {
+            const id = requestId++;
+            callbacksMap.set(id, { resolve, reject });
+            window.parent.postMessage({
+              type: 'proxyFetch',
+              id,
+              url,
+              init,
+            }, '*');
+          });
+        };
+
+        window.addEventListener('message', async (event) => {
+          if (event.data.type === 'takeScreenshot') {
+            const rootElement = document.getElementById('artifacts-component-root-html');
+            if (!rootElement) {
+              window.parent.postMessage({
+                type: 'screenshotError',
+                error: new Error('Root element not found'),
+              }, '*');
+            }
+            const screenshot = await htmlToImage.toPng(rootElement, {
+              imagePlaceholder:
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAA1JREFUGFdjePDgwX8ACOQDoNsk0PMAAAAASUVORK5CYII=",
+            });
+            window.parent.postMessage({
+              type: 'screenshotData',
+              data: screenshot,
+            }, '*');
+          } else if (event.data.type === 'claudeComplete') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.completion);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'proxyFetchResponse') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(new Response(event.data.body, {
+                status: event.data.status,
+                statusText: event.data.statusText,
+                headers: event.data.headers
+              }));
+            }
+            callbacksMap.delete(event.data.id);
+          }
+        });
+
+        window.addEventListener('click', (event) => {
+          const isEl = event.target instanceof HTMLElement;
+          if (!isEl) return;
+    
+          // find ancestor links
+          const linkEl = event.target.closest("a");
+          if (!linkEl || !linkEl.href) return;
+    
+          event.preventDefault();
+          event.stopImmediatePropagation();
+    
+          if (linkEl.href.startsWith("blob-request:")) {
+            const blob = getBlobFromURL(linkEl.href);
+            if (!blob) return;
+            void blob.arrayBuffer().then((data) => {
+              window.parent.postMessage({
+                type: "downloadFile",
+                filename: linkEl.download,
+                data,
+                mimeType: blob.type || "application/octet-stream",
+              });
+            });
+          } else if (linkEl.href.startsWith("data:")) {
+            const [header, base64Data] = linkEl.href.split(",");
+            const mimeMatch = header.match(/data:([^;]+)/);
+            const mimeType = mimeMatch ? mimeMatch[1] : "application/octet-stream";
+            const binaryString = atob(base64Data);
+            const data = Uint8Array.from(binaryString, (c) =>
+              c.charCodeAt(0),
+            ).buffer;
+            window.parent.postMessage({
+              type: "downloadFile",
+              filename: linkEl.download,
+              data,
+              mimeType,
+            });
+          } else {
+            let linkUrl;
+            try {
+              linkUrl = new URL(linkEl.href);
+            } catch (error) {
+              return;
+            }
+    
+            if (linkUrl.hostname === window.location.hostname) return;
+      
+            window.parent.postMessage({
+              type: 'openExternal',
+              href: linkEl.href,
+            }, '*');
+          }
+      });
+
+        const originalOpen = window.open;
+        window.open = function (url) {
+          window.parent.postMessage({
+            type: "openExternal",
+            href: url,
+          }, "*");
+        };
+
+        window.addEventListener('error', (event) => {
+          window.parent.postMessage({ type: 'console', message: 'Uncaught Error: ' + event.message }, '*');
+        });
+      })();
+    </script>
+  
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   <title>Plan d'entraînement Cyclo-cross U15</title>
+   <style>
+       * {
+           box-sizing: border-box;
+       }
+       
+       body {
+           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+           margin: 0;
+           padding: 20px;
+           background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+           min-height: 100vh;
+           line-height: 1.6;
+       }
+       
+       .container {
+           max-width: 1400px;
+           margin: 0 auto;
+           background: white;
+           border-radius: 12px;
+           box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+           overflow: hidden;
+       }
+       
+       .header {
+           background: linear-gradient(135deg, #2c3e50, #34495e);
+           color: white;
+           padding: 40px 30px;
+           text-align: center;
+       }
+       
+       .header h1 {
+           margin: 0 0 20px 0;
+           font-size: 2.5rem;
+           font-weight: 700;
+           text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+       }
+       
+       .info-header {
+           background: linear-gradient(135deg, #3498db, #2980b9);
+           color: white;
+           padding: 25px 30px;
+           margin: 0;
+       }
+       
+       .info-header h3 {
+           margin: 0 0 15px 0;
+           font-size: 1.3rem;
+       }
+       
+       .info-grid {
+           display: grid;
+           grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+           gap: 15px;
+           margin-top: 15px;
+       }
+       
+       .info-item {
+           background: rgba(255,255,255,0.1);
+           padding: 10px 15px;
+           border-radius: 6px;
+           backdrop-filter: blur(10px);
+       }
+       
+       .table-container {
+           padding: 20px;
+           overflow-x: auto;
+       }
+       
+       table {
+           width: 100%;
+           border-collapse: collapse;
+           margin-bottom: 30px;
+           font-size: 11px;
+           border-radius: 8px;
+           overflow: hidden;
+           box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+       }
+       
+       th, td {
+           border: 1px solid #e0e6ed;
+           padding: 12px 8px;
+           text-align: left;
+           vertical-align: top;
+           transition: background-color 0.2s ease;
+       }
+       
+       th {
+           background: linear-gradient(135deg, #34495e, #2c3e50);
+           color: white;
+           font-weight: 600;
+           position: sticky;
+           top: 0;
+           z-index: 10;
+           text-transform: uppercase;
+           font-size: 10px;
+           letter-spacing: 0.5px;
+       }
+       
+       tr:nth-child(even) {
+           background-color: #f8f9fa;
+       }
+       
+       tr:hover {
+           background-color: #e3f2fd;
+           transform: scale(1.001);
+           box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+       }
+       
+       .phase-1 { 
+           background: linear-gradient(90deg, #e8f6f3, #d5f4e6);
+           border-left: 4px solid #27ae60;
+       }
+       .phase-2 { 
+           background: linear-gradient(90deg, #fef9e7, #fcf4a3);
+           border-left: 4px solid #f39c12;
+       }
+       .phase-3 { 
+           background: linear-gradient(90deg, #fdf2e9, #fadbd8);
+           border-left: 4px solid #e67e22;
+       }
+       .phase-4 { 
+           background: linear-gradient(90deg, #eaf2f8, #d6eaf8);
+           border-left: 4px solid #3498db;
+       }
+       
+       .objectif {
+           background: linear-gradient(135deg, #f1c40f, #f39c12) !important;
+           font-weight: bold;
+           color: #2c3e50;
+           text-align: center;
+           font-size: 12px;
+           animation: pulse 2s infinite;
+       }
+       
+       @keyframes pulse {
+           0% { transform: scale(1); }
+           50% { transform: scale(1.05); }
+           100% { transform: scale(1); }
+       }
+       
+       .repos {
+           background: linear-gradient(90deg, #ecf0f1, #d5dbdb);
+           font-style: italic;
+           color: #7f8c8d;
+       }
+       
+       .stage {
+           background: linear-gradient(135deg, #8e44ad, #9b59b6);
+           color: white;
+           font-weight: bold;
+           text-align: center;
+           text-shadow: 0 1px 2px rgba(0,0,0,0.3);
+       }
+       
+       .volume {
+           font-weight: bold;
+           color: #27ae60;
+           font-size: 12px;
+       }
+       
+       .date {
+           font-weight: bold;
+           color: #2980b9;
+           font-size: 10px;
+       }
+       
+       .seance {
+           font-size: 10px;
+           line-height: 1.4;
+           padding: 4px;
+       }
+       
+       .seance strong {
+           color: #2c3e50;
+       }
+       
+       .legend {
+           margin: 20px;
+           padding: 25px;
+           background: linear-gradient(135deg, #ecf0f1, #bdc3c7);
+           border-radius: 10px;
+           box-shadow: inset 0 2px 4px rgba(0,0,0,0.1);
+       }
+       
+       .legend h4 {
+           margin-top: 0;
+           color: #2c3e50;
+           font-size: 1.2rem;
+           margin-bottom: 20px;
+       }
+       
+       .legend-grid {
+           display: grid;
+           grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+           gap: 10px;
+           margin-bottom: 20px;
+       }
+       
+       .legend-item {
+           padding: 8px 12px;
+           border-radius: 6px;
+           font-size: 12px;
+           font-weight: 500;
+           text-align: center;
+           transition: transform 0.2s ease;
+       }
+       
+       .legend-item:hover {
+           transform: translateY(-2px);
+           box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+       }
+       
+       .abbreviations {
+           background: rgba(255,255,255,0.8);
+           padding: 15px;
+           border-radius: 8px;
+           margin-top: 15px;
+       }
+       
+       .footer {
+           background: #2c3e50;
+           color: white;
+           text-align: center;
+           padding: 20px;
+           font-size: 14px;
+       }
+       
+       /* Responsive design */
+       @media (max-width: 768px) {
+           body {
+               padding: 10px;
+           }
+           
+           .header h1 {
+               font-size: 1.8rem;
+           }
+           
+           .info-grid {
+               grid-template-columns: 1fr;
+           }
+           
+           table {
+               font-size: 9px;
+           }
+           
+           th, td {
+               padding: 6px 4px;
+           }
+           
+           .seance {
+               font-size: 8px;
+           }
+       }
+       
+       /* Print styles */
+       @media print {
+           body {
+               background: white;
+           }
+           
+           .container {
+               box-shadow: none;
+           }
+           
+           .objectif {
+               animation: none;
+           }
+       }
+   </style>
+</head>
+<body id="artifacts-component-root-html">
+   <div class="container">
+       <div class="header">
+           <h1>🚴‍♂️ Plan d'entraînement Cyclo-cross U15 🏆</h1>
+           <p>Saison 2025 - Développement optimal pour jeune coureur</p>
+       </div>
+
+       <div class="info-header">
+           <h3>📋 Informations générales</h3>
+           <div class="info-grid">
+               <div class="info-item">
+                   <strong>Coureur :</strong> U15 expérimenté
+               </div>
+               <div class="info-item">
+                   <strong>Période :</strong> 28 juillet 2025 → 4 janvier 2026
+               </div>
+               <div class="info-item">
+                   <strong>Objectif 1 :</strong> 4 octobre 2025
+               </div>
+               <div class="info-item">
+                   <strong>Objectif 2 :</strong> 4 janvier 2026 (Championnat régional)
+               </div>
+               <div class="info-item">
+                   <strong>Prédominance :</strong> Développement VMA/VO2max
+               </div>
+               <div class="info-item">
+                   <strong>Stage montagne :</strong> 9-16 août 2025
+               </div>
+           </div>
+       </div>
+
+       <div class="table-container">
+           <table>
+               <thead>
+                   <tr>
+                       <th style="width: 8%;">Semaine</th>
+                       <th style="width: 12%;">Dates</th>
+                       <th style="width: 10%;">Phase</th>
+                       <th style="width: 8%;">Volume</th>
+                       <th style="width: 15%;">Focus</th>
+                       <th style="width: 12%;">Lundi</th>
+                       <th style="width: 12%;">Mardi</th>
+                       <th style="width: 12%;">Mercredi</th>
+                       <th style="width: 12%;">Jeudi</th>
+                       <th style="width: 8%;">Vendredi</th>
+                       <th style="width: 12%;">Samedi</th>
+                       <th style="width: 12%;">Dimanche</th>
+                   </tr>
+               </thead>
+               <tbody>
+                   <!-- Phase 1: Développement foncier et VMA -->
+                   <tr class="phase-1">
+                       <td class="volume">S1</td>
+                       <td class="date">28/07-03/08</td>
+                       <td>Phase 1</td>
+                       <td class="volume">8h</td>
+                       <td>Reprise + VMA courte</td>
+                       <td class="seance"><strong>PPG 45min</strong><br>Circuit 4x8 exos<br>45"/15"</td>
+                       <td class="seance"><strong>Route 1h30</strong><br>8x30"/30" Z5<br>Récup 3min</td>
+                       <td class="seance"><strong>CAP 35min</strong><br>Footing 25min<br>6x15" accél</td>
+                       <td class="seance"><strong>CX Tech 1h15</strong><br>Technique 30min<br>Parcours 20min</td>
+                       <td class="repos">Repos</td>
+                       <td class="seance"><strong>Route 1h45</strong><br>Z2-3 + 3x5min<br>tempo Z3</td>
+                       <td class="seance"><strong>Route 2h</strong><br>Z1-2 + sprints<br>courts</td>
+                   </tr>
+
+                   <tr class="phase-1">
+                       <td class="volume">S2</td>
+                       <td class="date">04/08-10/08</td>
+                       <td>Phase 1</td>
+                       <td class="volume">8h30</td>
+                       <td>VMA + prépa stage</td>
+                       <td class="seance"><strong>PPG 50min</strong><br>Renforcement<br>+ proprioception</td>
+                       <td class="seance"><strong>Route 1h30</strong><br>2x(5x1min/1min)<br>Z4-5</td>
+                       <td class="seance"><strong>CAP 40min</strong><br>20min + 8x30"/30"<br>+ 10min récup</td>
+                       <td class="seance"><strong>CX 1h30</strong><br>Parcours complet<br>+ simulations</td>
+                       <td class="repos">Repos<br>(prépa stage)</td>
+                       <td class="stage">STAGE MONTAGNE</td>
+                       <td class="stage">DÉBUT ALPES</td>
+                   </tr>
+
+                   <tr class="stage">
+                       <td class="volume">STAGE</td>
+                       <td class="date">09/08-16/08</td>
+                       <td>Montagne</td>
+                       <td class="volume">12-14h</td>
+                       <td>Aérobie + VMA longue</td>
+                       <td class="stage">4 sorties route montagne (2h-3h)</td>
+                       <td class="stage">2 séances VMA longue altitude</td>
+                       <td class="stage">2 sorties récup/technique</td>
+                       <td class="stage">1 séance PPG montagne</td>
+                       <td class="stage">Développement puissance/endurance</td>
+                       <td class="stage">2-3x8-12min Z4</td>
+                       <td class="stage">Trail/marche</td>
+                   </tr>
+
+                   <tr class="phase-1">
+                       <td class="volume">S3</td>
+                       <td class="date">18/08-24/08</td>
+                       <td>Phase 1</td>
+                       <td class="volume">9h</td>
+                       <td>Post-stage + VMA mixte</td>
+                       <td class="repos">Repos complet</td>
+                       <td class="seance"><strong>Route 1h15</strong><br>Récupération<br>active</td>
+                       <td class="seance"><strong>CAP 35min</strong><br>Facile</td>
+                       <td class="seance"><strong>CX 1h30</strong><br>Retour technique<br>progressive</td>
+                       <td class="seance"><strong>PPG 45min</strong><br>Léger</td>
+                       <td class="seance"><strong>Route 1h45</strong><br>3x8min Z3-4<br>Récup 4min</td>
+                       <td class="seance"><strong>Route 2h15</strong><br>Z1-2</td>
+                   </tr>
+
+                   <tr class="phase-1">
+                       <td class="volume">S4</td>
+                       <td class="date">25/08-31/08</td>
+                       <td>Phase 1</td>
+                       <td class="volume">9h30</td>
+                       <td>VMA spécifique CX</td>
+                       <td class="seance"><strong>PPG 50min</strong><br>Circuit CX<br>+ pliométrie</td>
+                       <td class="seance"><strong>Route 1h30</strong><br>12x1min/45" Z5<br>Récup 5min/6rép</td>
+                       <td class="seance"><strong>CAP 45min</strong><br>25min + 10x20"/20"<br>+ 10min</td>
+                       <td class="seance"><strong>CX 1h45</strong><br>Race simulation<br>3x15min allure</td>
+                       <td class="repos">Repos</td>
+                       <td class="seance"><strong>Route 1h30</strong><br>Récupération<br>active</td>
+                       <td class="seance"><strong>CX 2h</strong><br>Sortie longue<br>technique variée</td>
+                   </tr>
+
+                   <!-- Phase 2: Spécifique pré-compétitive -->
+                   <tr class="phase-2">
+                       <td class="volume">S5</td>
+                       <td class="date">01/09-07/09</td>
+                       <td>Phase 2</td>
+                       <td class="volume">10h</td>
+                       <td>Puissance + spécifique</td>
+                       <td class="seance"><strong>PPG 45min</strong><br>Renforcement<br>explosif + gainage</td>
+                       <td class="seance"><strong>Route 1h30</strong><br>2x(6x30"/2min30)<br>Z5-6</td>
+                       <td class="seance"><strong>CAP 40min</strong><br>Fartlek<br>6x(1min/2min)</td>
+                       <td class="seance"><strong>CX 1h45</strong><br>Simulation course<br>4x10min allure obj</td>
+                       <td class="repos">Repos</td>
+                       <td class="seance"><strong>COURSE CX</strong><br>ou Route 1h45<br>+ intensités</td>
+                       <td class="seance"><strong>Route 2h15</strong><br>Récupération</td>
+                   </tr>
+
+                   <tr class="phase-2">
+                       <td class="volume">S6</td>
+                       <td class="date">08/09-14/09</td>
+                       <td>Phase 2</td>
+                       <td class="volume">10h30</td>
+                       <td>Pic VMA + récupération</td>
+                       <td class="seance"><strong>PPG 50min</strong><br>Explosif</td>
+                       <td class="seance"><strong>Route 1h30</strong><br>15x45"/45" Z5<br>3 séries de 5</td>
+                       <td class="seance"><strong>CAP 35min</strong><br>Facile</td>
+                       <td class="seance"><strong>CX 2h</strong><br>Technique +<br>6x5min tempo</td>
+                       <td class="repos">Repos</td>
+                       <td class="seance"><strong>Route 1h30</strong><br>Récupération</td>
+                       <td class="seance"><strong>COURSE CX</strong><br>ou sortie<br>longue 2h30</td>
+                   </tr>
+
+                   <tr class="phase-2">
+                       <td class="volume">S7</td>
+                       <td class="date">15/09-21/09</td>
+                       <td>Phase 2</td>
+                       <td class="volume">9h30</td>
+                       <td>Affûtage objectif 1</td>
+                       <td class="seance"><strong>PPG 40min</strong><br>Maintenance</td>
+                       <td class="seance"><strong>Route 1h15</strong><br>8x1min/1min<br>Z4-5</td>
+                       <td class="seance"><strong>CAP 30min</strong><br>+ accélérations</td>
+                       <td class="seance"><strong>CX 1h30</strong><br>Technique pure<br>+ intensités courtes</td>
+                       <td class="repos">Repos</td>
+                       <td class="seance"><strong>Route 1h30</strong><br>Activation</td>
+                       <td class="seance"><strong>COURSE CX</strong><br>ou 2h facile</td>
+                   </tr>
+
+                   <tr class="phase-2">
+                       <td class="volume">S8</td>
+                       <td class="date">22/09-28/09</td>
+                       <td>Phase 2</td>
+                       <td class="volume">8h30</td>
+                       <td>Affûtage final obj 1</td>
+                       <td class="seance"><strong>PPG 35min</strong><br>Léger</td>
+                       <td class="seance"><strong>Route 1h15</strong><br>5x2min/2min<br>Z4</td>
+                       <td class="seance"><strong>CAP 25min</strong><br>Facile</td>
+                       <td class="seance"><strong>CX 1h15</strong><br>Technique +<br>4x3min allure</td>
+                       <td class="repos">Repos</td>
+                       <td class="seance"><strong>Route 1h</strong><br>Activation légère</td>
+                       <td class="seance"><strong>CX 1h30</strong><br>Technique +<br>activation</td>
+                   </tr>
+
+                   <tr class="phase-2">
+                       <td class="volume">S9</td>
+                       <td class="date">29/09-04/10</td>
+                       <td>Phase 2</td>
+                       <td class="volume">6h</td>
+                       <td>Affûtage final</td>
+                       <td class="seance"><strong>PPG 30min</strong><br>Activation</td>
+                       <td class="seance"><strong>Route 1h</strong><br>4x30"/3min<br>Z5</td>
+                       <td class="seance"><strong>CAP 20min</strong><br>Facile</td>
+                       <td class="seance"><strong>CX 45min</strong><br>Technique +<br>3x2min allure</td>
+                       <td class="repos">Repos complet</td>
+                       <td class="objectif">🎯 OBJECTIF 1<br>04/10/2025</td>
+                       <td class="repos">Récupération</td>
+                   </tr>
+
+                   <!-- Phase 3: Récupération et reconstruction -->
+                   <tr class="phase-3">
+                       <td class="volume">S10</td>
+                       <td class="date">05/10-11/10</td>
+                       <td>Phase 3</td>
+                       <td class="volume">6h</td>
+                       <td>Récupération active</td>
+                       <td class="repos">Repos complet</td>
+                       <td class="seance"><strong>Route 1h</strong><br>Facile</td>
+                       <td class="seance"><strong>CAP 25min</strong><br>Footing</td>
+                       <td class="seance"><strong>CX 1h</strong><br>Technique facile</td>
+                       <td class="seance"><strong>PPG 40min</strong><br>Léger</td>
+                       <td class="seance"><strong>Route 1h30</strong><br>Plaisir</td>
+                       <td class="seance"><strong>Route 2h</strong><br>Z1-2</td>
+                   </tr>
+
+                   <tr class="phase-3">
+                       <td class="volume">S11</td>
+                       <td class="date">12/10-18/10</td>
+                       <td>Phase 3</td>
+                       <td class="volume">7h</td>
+                       <td>Reconstruction foncière</td>
+                       <td class="seance"><strong>PPG 45min</strong><br>Progressive</td>
+                       <td class="seance"><strong>Route 1h30</strong><br>Z1-2 +<br>quelques intensités</td>
+                       <td class="seance"><strong>CAP 35min</strong><br>Footing</td>
+                       <td class="seance"><strong>CX 1h15</strong><br>Technique</td>
+                       <td class="repos">Repos</td>
+                       <td class="seance"><strong>Route 1h30</strong><br>Z2</td>
+                       <td class="seance"><strong>Route 2h</strong><br>Foncier</td>
+                   </tr>
+
+                   <tr class="phase-3">
+                       <td class="volume">S12</td>
+                       <td class="date">19/10-25/10</td>
+                       <td>Phase 3</td>
+                       <td class="volume">8h</td>
+                       <td>Reconstruction foncière</td>
+                       <td class="seance"><strong>PPG 45min</strong><br>Renforcement</td>
+                       <td class="seance"><strong>Route 1h30</strong><br>Z2 + 4x30"/30"</td>
+                       <td class="seance"><strong>CAP 35min</strong><br>+ accélérations</td>
+                       <td class="seance"><strong>CX 1h15</strong><br>Technique +<br>2x5min tempo</td>
+                       <td class="repos">Repos</td>
+                       <td class="seance"><strong>Route 1h45</strong><br>Z2-3</td>
+                       <td class="seance"><strong>Route 2h15</strong><br>Sortie longue</td>
+                   </tr>
+
+                   <tr class="phase-3">
+                       <td class="volume">S13</td>
+                       <td class="date">26/10-01/11</td>
+                       <td>Phase 3</td>
+                       <td class="volume">8h30</td>
+                       <td>Retour VMA progressive</td>
+                       <td class="seance"><strong>PPG 45min</strong><br>Force + explosivité</td>
+                       <td class="seance"><strong>Route 1h30</strong><br>6x30"/30" Z5</td>
+                       <td class="seance"><strong>CAP 35min</strong><br>Fartlek léger</td>
+                       <td class="seance"><strong>CX 1h30</strong><br>3x5min tempo</td>
+                       <td class="repos">Repos</td>
+                       <td class="seance"><strong>Route 1h45</strong><br>Z2-3</td>
+                       <td class="seance"><strong>Route 2h15</strong><br>Foncier</td>
+                   </tr>
+
+                   <tr class="phase-3">
+                       <td class="volume">S14</td>
+                       <td class="date">02/11-08/11</td>
+                       <td>Phase 3</td>
+                       <td class="volume">9h</td>
+                       <td>Retour VMA progressive</td>
+                       <td class="seance"><strong>PPG 50min</strong><br>Complet</td>
+                       <td class="seance"><strong>Route 1h30</strong><br>8x30"/30" Z5</td>
+                       <td class="seance"><strong>CAP 40min</strong><br>Fartlek</td>
+                       <td class="seance"><strong>CX 1h45</strong><br>4x5min tempo</td>
+                       <td class="repos">Repos</td>
+                       <td class="seance"><strong>Route 1h30</strong><br>+ intensités</td>
+                       <td class="seance"><strong>Route 2h30</strong><br>Sortie longue</td>
+                   </tr>
+
+                   <!-- Phase 4: Spécifique championnat régional -->
+                   <tr class="phase-4">
+                       <td class="volume">S15</td>
+                       <td class="date">09/11-15/11</td>
+                       <td>Phase 4</td>
+                       <td class="volume">9h30</td>
+                       <td>VMA spécifique + volume</td>
+                       <td class="seance"><strong>PPG 50min</strong><br>Force + explosivité</td>
+                       <td class="seance"><strong>Route 1h30</strong><br>10x1min/1min<br>Z4-5</td>
+                       <td class="seance"><strong>CAP 40min</strong><br>Fartlek</td>
+                       <td class="seance"><strong>CX 1h45</strong><br>Technique +<br>race pace</td>
+                       <td class="repos">Repos</td>
+                       <td class="seance"><strong>Course CX</strong><br>ou route 1h30<br>intense</td>
+                       <td class="seance"><strong>Route 2h15</strong><br>Longue</td>
+                   </tr>
+
+                   <tr class="phase-4">
+                       <td class="volume">S16</td>
+                       <td class="date">16/11-22/11</td>
+                       <td>Phase 4</td>
+                       <td class="volume">10h</td>
+                       <td>VMA spécifique + volume</td>
+                       <td class="seance"><strong>PPG 50min</strong><br>Explosivité</td>
+                       <td class="seance"><strong>Route 1h30</strong><br>12x1min/1min<br>Z4-5</td>
+                       <td class="seance"><strong>CAP 40min</strong><br>Fartlek intenses</td>
+                       <td class="seance"><strong>CX 1h45</strong><br>Race simulation</td>
+                       <td class="repos">Repos</td>
+                       <td class="seance"><strong>Course
